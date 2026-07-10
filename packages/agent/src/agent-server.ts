@@ -9,8 +9,19 @@ import {
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import type pino from "pino";
 import { WebSocket } from "ws";
+import { z } from "zod";
 import type { AgentConfig } from "./config.js";
 import type { SessionManager } from "./session-manager.js";
+
+const ClaudeHookRequestSchema = z.object({
+  muxlineSessionId: z.string().uuid(),
+  payload: z.object({
+    session_id: z.string().min(1).max(512),
+    transcript_path: z.string().min(1).max(16_384).optional(),
+    cwd: z.string().min(1).max(16_384).optional(),
+    hook_event_name: z.string().min(1).max(200).optional(),
+  }),
+});
 
 export interface AgentServer {
   app: FastifyInstance;
@@ -37,9 +48,17 @@ export async function createAgentServer(
     sessions: sessions.list(),
   }));
 
+  app.post("/v1/claude-hook", async (request, reply) => {
+    const token = request.headers["x-muxline-hook-token"];
+    if (typeof token !== "string") return reply.code(204).send();
+    const input = ClaudeHookRequestSchema.parse(request.body);
+    await sessions.applyClaudeHook(input.muxlineSessionId, token, input.payload);
+    return reply.code(204).send();
+  });
+
   app.post("/v1/sessions", { preHandler: localAuth(config) }, async (request, reply) => {
     const payload = CreateSessionRequestSchema.parse(request.body);
-    const session = sessions.create(payload);
+    const session = await sessions.create(payload);
     return reply.code(201).send({ session: session.summary() });
   });
 
@@ -47,8 +66,18 @@ export async function createAgentServer(
     "/v1/sessions/:id",
     { preHandler: localAuth(config) },
     async (request, reply) => {
-      const removed = sessions.remove(request.params.id);
+      const removed = await sessions.remove(request.params.id);
       return reply.code(removed ? 204 : 409).send();
+    },
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/v1/sessions/:id/snapshot",
+    { preHandler: localAuth(config) },
+    async (request, reply) => {
+      const data = await sessions.snapshot(request.params.id);
+      if (data === null) return reply.code(404).send({ error: "No saved screen for this session" });
+      return reply.send({ data });
     },
   );
 

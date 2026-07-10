@@ -1,5 +1,8 @@
 import { SerializeAddon } from "@xterm/addon-serialize";
-import { Terminal } from "@xterm/headless";
+import Headless from "@xterm/headless";
+import type { Terminal as HeadlessTerminal } from "@xterm/headless";
+
+const { Terminal } = Headless;
 
 export interface TerminalMirror {
   write(data: string): void;
@@ -9,7 +12,7 @@ export interface TerminalMirror {
 }
 
 export class XtermTerminalMirror implements TerminalMirror {
-  readonly #terminal: Terminal;
+  readonly #terminal: HeadlessTerminal;
   readonly #serializer: SerializeAddon;
   #queue: Promise<void> = Promise.resolve();
   #disposed = false;
@@ -19,7 +22,10 @@ export class XtermTerminalMirror implements TerminalMirror {
       cols,
       rows,
       scrollback,
-      allowProposedApi: false,
+      // SerializeAddon reads the headless buffer through xterm's currently
+      // proposed API. This is local-only state; no browser-facing proposed API
+      // is exposed here.
+      allowProposedApi: true,
     });
     this.#serializer = new SerializeAddon();
     this.#terminal.loadAddon(this.#serializer);

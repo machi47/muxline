@@ -40,14 +40,52 @@ describe("ManagedSession", () => {
     const desktopMessages: Array<{ type: string; [key: string]: unknown }> = [];
     const phoneMessages: Array<{ type: string; [key: string]: unknown }> = [];
     const session = new ManagedSession({
-      id: "11111111-1111-4111-8111-111111111111",
-      hostId: "22222222-2222-4222-8222-222222222222",
-      hostName: "mac",
-      profile: "codex",
-      displayName: "codex · project",
-      cwdLabel: "project",
-      cols: 80,
-      rows: 24,
+      summary: {
+        id: "11111111-1111-4111-8111-111111111111",
+        revision: 1,
+        hostId: "22222222-2222-4222-8222-222222222222",
+        hostName: "mac",
+        profile: {
+          id: "codex",
+          label: "codex",
+          harness: "codex",
+          provider: null,
+          invocation: "codex",
+        },
+        workspace: {
+          id: "workspace-00000001",
+          path: "/Users/me/project",
+          label: "project",
+          gitRoot: null,
+          repository: null,
+        },
+        displayName: "codex · project",
+        nativeSession: {
+          harness: "codex",
+          id: null,
+          status: "unresolved",
+          confidence: "none",
+          title: null,
+          sourcePath: null,
+          updatedAt: null,
+          resumeCommand: null,
+        },
+        state: "live",
+        runtimeId: "33333333-3333-4333-8333-333333333333",
+        startedAt: "2026-01-01T00:00:00.000Z",
+        lastOutputAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        endedAt: null,
+        reboundAt: null,
+        exitCode: null,
+        signal: null,
+        cols: 80,
+        rows: 24,
+        sequence: 0,
+        snapshot: { available: false, capturedAt: null, bytes: 0, sequence: 0 },
+        viewers: 0,
+        controller: null,
+      },
       pty: pty as unknown as IPty,
       mirror,
       onChanged() {},
@@ -74,6 +112,6 @@ describe("ManagedSession", () => {
 
     pty.exit(7);
     expect(phoneMessages.at(-1)).toMatchObject({ type: "exit", exitCode: 7 });
-    expect(session.summary()).toMatchObject({ state: "exited", exitCode: 7, cols: 120, rows: 40 });
+    expect(session.summary()).toMatchObject({ state: "saved", exitCode: 7, cols: 120, rows: 40 });
   });
 });

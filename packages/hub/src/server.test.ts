@@ -9,6 +9,7 @@ const config: HubConfig = {
   authMode: "dev",
   agentToken: "a".repeat(32),
   allowedTailnetUsers: new Set(),
+  dataDir: "/tmp/muxline-hub-server-test",
   webDist: "/definitely/not/a/web/build",
   logLevel: "silent",
 };

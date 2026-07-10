@@ -14,6 +14,7 @@ import {
 } from "./auth.js";
 import { AttachmentNonceStore } from "./attachment-nonces.js";
 import type { HubConfig } from "./config.js";
+import { HubCatalog } from "./catalog.js";
 import { HubRegistry } from "./registry.js";
 
 export interface HubServer {
@@ -27,7 +28,9 @@ export async function createHubServer(
   logger: pino.Logger,
 ): Promise<HubServer> {
   const app = Fastify({ logger: false, bodyLimit: 256 * 1024 });
-  const registry = new HubRegistry(logger);
+  const catalog = new HubCatalog(config.dataDir);
+  await catalog.initialize();
+  const registry = new HubRegistry(logger, catalog);
   const nonces = new AttachmentNonceStore();
   await app.register(websocket, { options: { maxPayload: 2 * 1024 * 1024 } });
 
@@ -83,6 +86,16 @@ export async function createHubServer(
     );
   });
 
+  app.get<{ Params: { hostId: string; sessionId: string } }>(
+    "/v1/sessions/:hostId/:sessionId/snapshot",
+    async (request, reply) => {
+      authenticateWebRequest(request, config);
+      const snapshot = await registry.snapshot(request.params.hostId, request.params.sessionId);
+      if (!snapshot) return reply.code(404).send({ error: "No saved screen for this session" });
+      return reply.send(snapshot);
+    },
+  );
+
   app.get("/v1/terminal", { websocket: true }, (socket, request) => {
     try {
       assertSameOrigin(request, config);
@@ -130,7 +143,7 @@ export async function createHubServer(
       );
     },
     async close() {
-      registry.close();
+      await registry.close();
       await app.close();
     },
   };

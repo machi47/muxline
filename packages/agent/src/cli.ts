@@ -15,11 +15,12 @@ import {
 import pino from "pino";
 import WebSocket from "ws";
 import { createAgentServer } from "./agent-server.js";
-import { loadOrCreateAgentConfig, saveAgentHubConfig } from "./config.js";
+import { loadOrCreateAgentConfig, saveAgentHubConfig, saveAgentProfile } from "./config.js";
 import { HubBridge } from "./hub-bridge.js";
 import { buildLaunchSpec } from "./launch-adapter.js";
 import { LocalAgentApi } from "./local-api.js";
 import { SessionManager } from "./session-manager.js";
+import { runSessionRunner } from "./runner-process.js";
 import { installShims } from "./shims.js";
 
 interface RunArguments {
@@ -44,8 +45,14 @@ async function main(): Promise<number> {
       return createShims(args);
     case "configure-hub":
       return configureHub(args);
+    case "profile":
+      return configureProfile(args);
     case "doctor":
       return doctor();
+    case "claude-hook":
+      return runClaudeHook();
+    case "runner":
+      return runRunner(args);
     case "help":
     case "--help":
     case "-h":
@@ -67,6 +74,7 @@ async function runAgent(): Promise<number> {
     },
   });
   const sessions = new SessionManager(config);
+  await sessions.initialize();
   const server = await createAgentServer(config, sessions, logger);
   const hub = new HubBridge(config, sessions, logger);
 
@@ -75,6 +83,7 @@ async function runAgent(): Promise<number> {
   await waitForShutdownSignal();
   hub.stop();
   await server.close();
+  await sessions.shutdown();
   logger.info("Muxline agent stopped");
   return 0;
 }
@@ -240,8 +249,8 @@ async function listSessions(): Promise<number> {
   const rows = sessions.map((session) => ({
     id: session.id,
     state: session.state,
-    profile: session.profile,
-    cwd: session.cwdLabel,
+    profile: session.profile.label,
+    cwd: session.workspace.path,
     started: session.startedAt,
     control: session.controller?.source ?? "-",
   }));
@@ -281,6 +290,40 @@ async function configureHub(args: string[]): Promise<number> {
   return 0;
 }
 
+async function configureProfile(args: string[]): Promise<number> {
+  if (args[0] === "list") {
+    const config = await loadOrCreateAgentConfig();
+    process.stdout.write(`${JSON.stringify(config.profiles, null, 2)}\n`);
+    return 0;
+  }
+  if (args[0] !== "set" || !args[1]) {
+    throw new Error("Usage: muxline profile set <alias> --harness <claude-code|codex|generic> [--label text] [--provider name]");
+  }
+  const id = args[1];
+  let harness: "claude-code" | "codex" | "generic" | undefined;
+  let label: string | undefined;
+  let provider: string | undefined;
+  for (let index = 2; index < args.length; index += 1) {
+    const flag = args[index];
+    const value = args[index + 1];
+    if (!value) throw new Error(`${flag ?? "Option"} requires a value`);
+    if (flag === "--harness") harness = parseHarness(value);
+    else if (flag === "--label") label = value;
+    else if (flag === "--provider") provider = value;
+    else throw new Error(`Unknown profile option: ${flag}`);
+    index += 1;
+  }
+  if (!harness) throw new Error("--harness is required");
+  const config = await loadOrCreateAgentConfig();
+  await saveAgentProfile(config, id, {
+    harness,
+    ...(label ? { label } : {}),
+    ...(provider ? { provider } : {}),
+  });
+  process.stdout.write(`Saved profile ${id} as ${harness}.\n`);
+  return 0;
+}
+
 async function doctor(): Promise<number> {
   const config = await loadOrCreateAgentConfig();
   const api = new LocalAgentApi(config);
@@ -296,6 +339,38 @@ async function doctor(): Promise<number> {
   };
   process.stdout.write(`${JSON.stringify(status, null, 2)}\n`);
   return status.agentRunning ? 0 : 1;
+}
+
+/** Invoked only by Muxline's per-launch Claude plugin. It must stay silent. */
+async function runClaudeHook(): Promise<number> {
+  const sessionId = process.env.MUXLINE_SESSION_ID;
+  const token = process.env.MUXLINE_HOOK_TOKEN;
+  if (!sessionId || !token) return 0;
+  try {
+    const input = await readStdin(1_048_576);
+    const payload = JSON.parse(input) as unknown;
+    if (!payload || typeof payload !== "object") return 0;
+    const config = await loadOrCreateAgentConfig();
+    await fetch(`http://127.0.0.1:${config.localPort}/v1/claude-hook`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-muxline-hook-token": token,
+      },
+      body: JSON.stringify({ muxlineSessionId: sessionId, payload }),
+      signal: AbortSignal.timeout(1_500),
+    });
+  } catch {
+    // Hooks must not make Claude's own session noisy or fail to start/end.
+  }
+  return 0;
+}
+
+async function runRunner(args: string[]): Promise<number> {
+  const manifestPath = args[0];
+  if (!manifestPath || args.length !== 1) throw new Error("Usage: muxline runner <manifest-path>");
+  await runSessionRunner(manifestPath);
+  return 0;
 }
 
 async function ensureAgent(api: LocalAgentApi): Promise<void> {
@@ -395,6 +470,11 @@ function terminalRows(): number {
   return Math.max(1, process.stdout.rows || 24);
 }
 
+function parseHarness(value: string): "claude-code" | "codex" | "generic" {
+  if (value === "claude-code" || value === "codex" || value === "generic") return value;
+  throw new Error("--harness must be claude-code, codex, or generic");
+}
+
 function waitForShutdownSignal(): Promise<void> {
   return new Promise((resolve) => {
     const stop = () => resolve();
@@ -407,6 +487,18 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+async function readStdin(limit: number): Promise<string> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of process.stdin) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+    total += bytes.length;
+    if (total > limit) throw new Error("Hook input is too large");
+    chunks.push(bytes);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 function quoteForDisplay(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
@@ -417,6 +509,8 @@ function printHelp(): void {
 Usage:
   muxline shim claude claude-glm codex
   muxline configure-hub <https-url> <agent-token>
+  muxline profile set <alias> --harness <claude-code|codex|generic> [--provider name]
+  muxline profile list
   muxline run --profile <name> -- <command> [arguments...]
   muxline attach <session-id>
   muxline list

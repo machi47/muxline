@@ -8,6 +8,7 @@ const config: HubConfig = {
   authMode: "tailscale",
   agentToken: "a".repeat(32),
   allowedTailnetUsers: new Set(["me@example.com"]),
+  dataDir: "/tmp/muxline-hub-auth-test",
   webDist: "/tmp/none",
   logLevel: "silent",
 };

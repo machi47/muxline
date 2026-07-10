@@ -28,6 +28,7 @@ export class HubBridge {
   #retryTimer: NodeJS.Timeout | null = null;
   #heartbeatTimer: NodeJS.Timeout | null = null;
   #removeSessionListener: (() => void) | null = null;
+  #removeSnapshotListener: (() => void) | null = null;
 
   public constructor(config: AgentConfig, sessions: SessionManager, logger: pino.Logger) {
     this.#config = config;
@@ -44,6 +45,19 @@ export class HubBridge {
     this.#removeSessionListener = this.#sessions.onUpsert((session) => {
       this.#send({ type: "session-upsert", session });
     });
+    this.#removeSnapshotListener = this.#sessions.onSnapshot((session, data) => {
+      const capturedAt = session.snapshot.capturedAt;
+      if (!capturedAt) return;
+      this.#send({
+        type: "session-snapshot",
+        hostId: this.#config.hostId,
+        sessionId: session.id,
+        revision: session.revision,
+        capturedAt,
+        sequence: session.snapshot.sequence,
+        data,
+      });
+    });
     this.#connect();
   }
 
@@ -51,6 +65,8 @@ export class HubBridge {
     this.#stopping = true;
     this.#removeSessionListener?.();
     this.#removeSessionListener = null;
+    this.#removeSnapshotListener?.();
+    this.#removeSnapshotListener = null;
     if (this.#retryTimer) {
       clearTimeout(this.#retryTimer);
       this.#retryTimer = null;
@@ -94,6 +110,7 @@ export class HubBridge {
         agentVersion: "0.1.0",
       });
       this.#send({ type: "session-list", sessions: this.#sessions.list() });
+      void this.#publishSnapshots();
       this.#heartbeatTimer = setInterval(
         () => this.#send({ type: "heartbeat", at: Date.now() }),
         15_000,
@@ -177,6 +194,27 @@ export class HubBridge {
 
   #sendTerminal(tunnelId: string, message: ServerTerminalMessage): void {
     this.#send({ type: "terminal-message", tunnelId, message });
+  }
+
+  async #publishSnapshots(): Promise<void> {
+    for (const session of this.#sessions.list()) {
+      if (!session.snapshot.available || !session.snapshot.capturedAt) continue;
+      try {
+        const data = await this.#sessions.snapshot(session.id);
+        if (!data) continue;
+        this.#send({
+          type: "session-snapshot",
+          hostId: this.#config.hostId,
+          sessionId: session.id,
+          revision: session.revision,
+          capturedAt: session.snapshot.capturedAt,
+          sequence: session.snapshot.sequence,
+          data,
+        });
+      } catch (error) {
+        this.#logger.debug({ err: error, sessionId: session.id }, "Could not publish saved screen");
+      }
+    }
   }
 
   #send(message: AgentToHubMessage): void {

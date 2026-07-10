@@ -32,6 +32,6 @@ describe("protocol validation", () => {
     });
 
     expect(request.args).toEqual(["--prompt", "$(touch /tmp/should-not-run)", "a;b", "--"]);
-    expect(PROTOCOL_VERSION).toBe(1);
+    expect(PROTOCOL_VERSION).toBe(2);
   });
 });

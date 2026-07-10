@@ -1,4 +1,6 @@
 import { fileURLToPath } from "node:url";
+import os from "node:os";
+import path from "node:path";
 import { z } from "zod";
 
 const AuthModeSchema = z.enum(["dev", "tailscale", "token"]);
@@ -11,6 +13,7 @@ export interface HubConfig {
   agentToken: string;
   webToken?: string;
   allowedTailnetUsers: ReadonlySet<string>;
+  dataDir: string;
   webDist: string;
   logLevel: "fatal" | "error" | "warn" | "info" | "debug" | "trace" | "silent";
 }
@@ -57,6 +60,9 @@ export function loadHubConfig(environment: NodeJS.ProcessEnv = process.env): Hub
     agentToken,
     ...(webToken ? { webToken } : {}),
     allowedTailnetUsers,
+    dataDir: environment.MUXLINE_HUB_HOME
+      ? path.resolve(environment.MUXLINE_HUB_HOME)
+      : path.join(os.homedir(), ".muxline-hub"),
     webDist: environment.MUXLINE_WEB_DIST ?? defaultWebDist,
     logLevel,
   };

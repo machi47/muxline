@@ -1,8 +1,10 @@
 import type {
   ClientTerminalMessage,
   Controller,
+  NativeSessionRef,
   ServerTerminalMessage,
   SessionSummary,
+  SnapshotInfo,
 } from "@muxline/protocol";
 import type { IPty } from "node-pty";
 import { ControlLease } from "./control-lease.js";
@@ -21,52 +23,37 @@ interface Subscriber {
   pending: PendingOutput[];
 }
 
-export interface ManagedSessionOptions {
-  id: string;
-  hostId: string;
-  hostName: string;
-  profile: string;
-  displayName: string;
-  cwdLabel: string;
-  cols: number;
-  rows: number;
-  pty: IPty;
-  mirror: TerminalMirror;
-  onChanged: (immediate: boolean) => void;
+export interface ManagedSessionChange {
+  immediate: boolean;
+  durable: boolean;
+  captureSnapshot: boolean;
+  kind: "created" | "native-linked" | "saved" | "interrupted" | "rebound" | "snapshot";
 }
 
+export interface ManagedSessionOptions {
+  summary: SessionSummary;
+  pty: IPty;
+  mirror: TerminalMirror;
+  onChanged: (session: ManagedSession, change: ManagedSessionChange) => void;
+}
+
+/**
+ * The live PTY binding. The durable identity is `summary.id`; this class never
+ * pretends an exited PTY is a native Claude/Codex session.
+ */
 export class ManagedSession {
   readonly id: string;
-  readonly #hostId: string;
-  readonly #hostName: string;
-  readonly #profile: string;
-  readonly #displayName: string;
-  readonly #cwdLabel: string;
   readonly #pty: IPty;
   readonly #mirror: TerminalMirror;
   readonly #lease = new ControlLease();
   readonly #subscribers = new Map<string, Subscriber>();
-  readonly #onChanged: (immediate: boolean) => void;
-  readonly #startedAt = new Date();
-  #lastOutputAt = this.#startedAt;
-  #endedAt: Date | null = null;
-  #state: "running" | "exited" | "failed" = "running";
-  #exitCode: number | null = null;
-  #signal: number | null = null;
-  #cols: number;
-  #rows: number;
-  #sequence = 0;
+  readonly #onChanged: (session: ManagedSession, change: ManagedSessionChange) => void;
+  #summary: SessionSummary;
   #disposed = false;
 
   public constructor(options: ManagedSessionOptions) {
-    this.id = options.id;
-    this.#hostId = options.hostId;
-    this.#hostName = options.hostName;
-    this.#profile = options.profile;
-    this.#displayName = options.displayName;
-    this.#cwdLabel = options.cwdLabel;
-    this.#cols = options.cols;
-    this.#rows = options.rows;
+    this.id = options.summary.id;
+    this.#summary = options.summary;
     this.#pty = options.pty;
     this.#mirror = options.mirror;
     this.#onChanged = options.onChanged;
@@ -77,24 +64,64 @@ export class ManagedSession {
 
   public summary(): SessionSummary {
     return {
-      id: this.id,
-      hostId: this.#hostId,
-      hostName: this.#hostName,
-      profile: this.#profile,
-      displayName: this.#displayName,
-      cwdLabel: this.#cwdLabel,
-      state: this.#state,
-      startedAt: this.#startedAt.toISOString(),
-      lastOutputAt: this.#lastOutputAt.toISOString(),
-      endedAt: this.#endedAt?.toISOString() ?? null,
-      exitCode: this.#exitCode,
-      signal: this.#signal,
-      cols: this.#cols,
-      rows: this.#rows,
-      sequence: this.#sequence,
+      ...this.#summary,
       viewers: this.#subscribers.size,
       controller: this.#lease.current(),
     };
+  }
+
+  public snapshot(): Promise<string> {
+    return this.#mirror.snapshot();
+  }
+
+  public setNativeSession(nativeSession: NativeSessionRef, rebound = false): void {
+    this.#summary = {
+      ...this.#summary,
+      revision: this.#summary.revision + 1,
+      nativeSession,
+      ...(rebound ? { reboundAt: new Date().toISOString() } : {}),
+      updatedAt: new Date().toISOString(),
+    };
+    this.#onChanged(this, {
+      immediate: true,
+      durable: true,
+      captureSnapshot: false,
+      kind: rebound ? "rebound" : "native-linked",
+    });
+  }
+
+  public setSnapshot(snapshot: SnapshotInfo): void {
+    this.#summary = {
+      ...this.#summary,
+      revision: this.#summary.revision + 1,
+      snapshot,
+      updatedAt: new Date().toISOString(),
+    };
+    this.#onChanged(this, {
+      immediate: true,
+      durable: true,
+      captureSnapshot: false,
+      kind: "snapshot",
+    });
+  }
+
+  public markInterrupted(): void {
+    if (this.#summary.state !== "live") return;
+    const now = new Date().toISOString();
+    this.#summary = {
+      ...this.#summary,
+      revision: this.#summary.revision + 1,
+      state: "interrupted",
+      runtimeId: null,
+      endedAt: now,
+      updatedAt: now,
+    };
+    this.#onChanged(this, {
+      immediate: true,
+      durable: true,
+      captureSnapshot: false,
+      kind: "interrupted",
+    });
   }
 
   public async attach(
@@ -102,8 +129,8 @@ export class ManagedSession {
     source: "local" | "remote",
     send: (message: ServerTerminalMessage) => void,
   ): Promise<void> {
-    if (this.#disposed) {
-      throw new Error("Session is no longer available");
+    if (this.#disposed || this.#summary.state !== "live") {
+      throw new Error("This session is no longer live");
     }
     if (this.#subscribers.has(clientId)) {
       throw new Error(`Client ${clientId} is already attached`);
@@ -117,9 +144,9 @@ export class ManagedSession {
       pending: [],
     };
     this.#subscribers.set(clientId, subscriber);
-    const snapshotSequence = this.#sequence;
+    const snapshotSequence = this.#summary.sequence;
     const snapshotSummary = { ...this.summary(), sequence: snapshotSequence };
-    this.#onChanged(true);
+    this.#notifyTransient(true);
 
     try {
       const data = await this.#mirror.snapshot();
@@ -136,11 +163,11 @@ export class ManagedSession {
       subscriber.pending.length = 0;
       subscriber.ready = true;
       this.#sendControlState(subscriber);
-      if (this.#state !== "running" && this.#exitCode !== null) {
+      if (this.#summary.state !== "live" && this.#summary.exitCode !== null) {
         this.#send(subscriber, {
           type: "exit",
-          exitCode: this.#exitCode,
-          signal: this.#signal,
+          exitCode: this.#summary.exitCode,
+          signal: this.#summary.signal,
         });
       }
     } catch (error) {
@@ -156,15 +183,13 @@ export class ManagedSession {
       this.#broadcastControl();
     }
     if (existed) {
-      this.#onChanged(true);
+      this.#notifyTransient(true);
     }
   }
 
   public handleClientMessage(clientId: string, message: ClientTerminalMessage): void {
     const subscriber = this.#subscribers.get(clientId);
-    if (!subscriber) {
-      return;
-    }
+    if (!subscriber) return;
 
     switch (message.type) {
       case "input": {
@@ -176,23 +201,29 @@ export class ManagedSession {
           });
           return;
         }
-        if (this.#state === "running") {
+        if (this.#summary.state === "live") {
           this.#pty.write(message.data);
         }
         return;
       }
       case "resize": {
-        if (!this.#lease.touch(clientId)) {
-          return;
-        }
-        if (message.cols === this.#cols && message.rows === this.#rows) {
-          return;
-        }
-        this.#cols = message.cols;
-        this.#rows = message.rows;
+        if (!this.#lease.touch(clientId)) return;
+        if (message.cols === this.#summary.cols && message.rows === this.#summary.rows) return;
         this.#pty.resize(message.cols, message.rows);
         this.#mirror.resize(message.cols, message.rows);
-        this.#onChanged(true);
+        this.#summary = {
+          ...this.#summary,
+          revision: this.#summary.revision + 1,
+          cols: message.cols,
+          rows: message.rows,
+          updatedAt: new Date().toISOString(),
+        };
+        this.#onChanged(this, {
+          immediate: true,
+          durable: true,
+          captureSnapshot: true,
+          kind: "snapshot",
+        });
         return;
       }
       case "claim-control": {
@@ -207,13 +238,13 @@ export class ManagedSession {
           return;
         }
         this.#broadcastControl();
-        this.#onChanged(true);
+        this.#notifyTransient(true);
         return;
       }
       case "release-control": {
         if (this.#lease.release(clientId)) {
           this.#broadcastControl();
-          this.#onChanged(true);
+          this.#notifyTransient(true);
         }
         return;
       }
@@ -226,27 +257,28 @@ export class ManagedSession {
   }
 
   public kill(): void {
-    if (this.#state === "running") {
-      this.#pty.kill();
-    }
+    if (this.#summary.state === "live") this.#pty.kill();
   }
 
   public dispose(): void {
-    if (this.#disposed) {
-      return;
-    }
+    if (this.#disposed) return;
     this.#disposed = true;
     this.#subscribers.clear();
     this.#mirror.dispose();
   }
 
   #handleOutput(data: string): void {
-    if (this.#disposed) {
-      return;
-    }
-    this.#sequence += 1;
-    this.#lastOutputAt = new Date();
-    const output = { sequence: this.#sequence, data };
+    if (this.#disposed) return;
+    const now = new Date().toISOString();
+    const sequence = this.#summary.sequence + 1;
+    this.#summary = {
+      ...this.#summary,
+      revision: this.#summary.revision + 1,
+      sequence,
+      lastOutputAt: now,
+      updatedAt: now,
+    };
+    const output = { sequence, data };
     this.#mirror.write(data);
 
     for (const subscriber of this.#subscribers.values()) {
@@ -256,31 +288,49 @@ export class ManagedSession {
       }
       this.#send(subscriber, { type: "output", ...output });
     }
-    this.#onChanged(false);
+    this.#onChanged(this, {
+      immediate: false,
+      durable: true,
+      captureSnapshot: true,
+      kind: "snapshot",
+    });
   }
 
   #handleExit(exitCode: number, signal: number): void {
-    if (this.#state !== "running") {
-      return;
-    }
-    this.#state = "exited";
-    this.#exitCode = exitCode;
-    this.#signal = signal === 0 ? null : signal;
-    this.#endedAt = new Date();
+    if (this.#summary.state !== "live") return;
+    const now = new Date().toISOString();
+    this.#summary = {
+      ...this.#summary,
+      revision: this.#summary.revision + 1,
+      state: "saved",
+      runtimeId: null,
+      exitCode,
+      signal: signal === 0 ? null : signal,
+      endedAt: now,
+      updatedAt: now,
+    };
     for (const subscriber of this.#subscribers.values()) {
-      this.#send(subscriber, {
-        type: "exit",
-        exitCode,
-        signal: this.#signal,
-      });
+      this.#send(subscriber, { type: "exit", exitCode, signal: this.#summary.signal });
     }
-    this.#onChanged(true);
+    this.#onChanged(this, {
+      immediate: true,
+      durable: true,
+      captureSnapshot: true,
+      kind: "saved",
+    });
+  }
+
+  #notifyTransient(immediate: boolean): void {
+    this.#onChanged(this, {
+      immediate,
+      durable: false,
+      captureSnapshot: false,
+      kind: "snapshot",
+    });
   }
 
   #broadcastControl(): void {
-    for (const subscriber of this.#subscribers.values()) {
-      this.#sendControlState(subscriber);
-    }
+    for (const subscriber of this.#subscribers.values()) this.#sendControlState(subscriber);
   }
 
   #sendControlState(subscriber: Subscriber): void {

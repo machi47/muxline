@@ -12,6 +12,11 @@ const AgentConfigFileSchema = z.object({
   localToken: z.string().min(32),
   hubUrl: z.string().url().optional(),
   hubToken: z.string().min(16).optional(),
+  profiles: z.record(z.string(), z.object({
+    harness: z.enum(["claude-code", "codex", "generic"]),
+    label: z.string().min(1).max(160).optional(),
+    provider: z.string().min(1).max(160).optional(),
+  })).default({}),
   logLevel: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]),
 });
 
@@ -42,6 +47,7 @@ export async function loadOrCreateAgentConfig(
       hostName: os.hostname(),
       localPort: 7337,
       localToken: randomBytes(32).toString("base64url"),
+      profiles: {},
       logLevel: "info",
     };
     const temporaryPath = `${configPath}.${process.pid}.tmp`;
@@ -80,6 +86,34 @@ export async function saveAgentHubConfig(
     localToken: config.localToken,
     hubUrl,
     hubToken,
+    profiles: config.profiles,
+    logLevel: config.logLevel,
+  });
+  const configPath = path.join(config.dataDir, "agent.json");
+  const temporaryPath = `${configPath}.${process.pid}.tmp`;
+  await fs.writeFile(temporaryPath, `${JSON.stringify(updated, null, 2)}\n`, {
+    mode: 0o600,
+    flag: "wx",
+  });
+  await fs.rename(temporaryPath, configPath);
+  await fs.chmod(configPath, 0o600).catch(() => undefined);
+  return { ...updated, dataDir: config.dataDir };
+}
+
+export async function saveAgentProfile(
+  config: AgentConfig,
+  id: string,
+  profile: AgentConfig["profiles"][string],
+): Promise<AgentConfig> {
+  const updated = AgentConfigFileSchema.parse({
+    version: config.version,
+    hostId: config.hostId,
+    hostName: config.hostName,
+    localPort: config.localPort,
+    localToken: config.localToken,
+    ...(config.hubUrl ? { hubUrl: config.hubUrl } : {}),
+    ...(config.hubToken ? { hubToken: config.hubToken } : {}),
+    profiles: { ...config.profiles, [id]: profile },
     logLevel: config.logLevel,
   });
   const configPath = path.join(config.dataDir, "agent.json");
