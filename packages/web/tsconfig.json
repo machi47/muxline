@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "rootDir": "src",
+    "outDir": ".typecheck",
+    "tsBuildInfoFile": ".typecheck/.tsbuildinfo",
+    "declaration": true
+  },
+  "references": [{ "path": "../protocol" }],
+  "include": ["src/**/*.ts"]
+}

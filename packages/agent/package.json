@@ -1,0 +1,26 @@
+{
+  "name": "@muxline/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "muxline": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@fastify/websocket": "^11.3.0",
+    "@muxline/protocol": "0.1.0",
+    "@xterm/addon-serialize": "^0.14.0",
+    "@xterm/headless": "^6.0.0",
+    "fastify": "^5.10.0",
+    "node-pty": "^1.1.0",
+    "pino": "^10.3.1",
+    "ws": "^8.21.0",
+    "zod": "^4.4.3"
+  }
+}

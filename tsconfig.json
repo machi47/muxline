@@ -1,0 +1,9 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/protocol" },
+    { "path": "packages/agent" },
+    { "path": "packages/web" },
+    { "path": "packages/hub" }
+  ]
+}

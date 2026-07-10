@@ -1,0 +1,31 @@
+{
+  "name": "muxline",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Transparent, persistent terminal sessions across your computers and phone.",
+  "type": "module",
+  "bin": {
+    "muxline": "packages/agent/dist/cli.js"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @muxline/protocol && npm run build -w @muxline/agent && npm run build -w @muxline/web && npm run build -w @muxline/hub",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev:agent": "tsx packages/agent/src/cli.ts agent",
+    "dev:hub": "tsx packages/hub/src/cli.ts"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.20.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}
