@@ -84,14 +84,17 @@ export class SessionManager {
     const manifests = this.#useRunners ? await this.#runnerStore.list() : [];
     const activeIds = new Set(
       manifests
-        .filter((manifest) => manifest.status === "running" && manifest.port !== null)
+        .filter((manifest) => (manifest.status === "running" || manifest.status === "starting") && manifest.summary.state === "live")
         .map((manifest) => manifest.id),
     );
     await this.#ledger.markPreviouslyLiveInterrupted(activeIds);
     for (const record of await this.#ledger.list()) {
       this.#records.set(record.session.id, record.session);
     }
-    for (const manifest of manifests) {
+    for (const originalManifest of manifests) {
+      const manifest = originalManifest.status === "starting"
+        ? (await this.#waitForRunnerManifest(originalManifest.id, 3_000) ?? originalManifest)
+        : originalManifest;
       const hookToken = manifest.launch?.env.MUXLINE_HOOK_TOKEN;
       if (hookToken) this.#hookTokens.set(manifest.id, hookToken);
       const existing = this.#records.get(manifest.id);
@@ -192,24 +195,31 @@ export class SessionManager {
       MUXLINE_RUNTIME_ID: runtimeId,
       ...(hookToken ? { MUXLINE_HOOK_TOKEN: hookToken } : {}),
     };
-    const session: NativeAwareSession = this.#useRunners
-      ? await this.#startRunner({
-        version: 1,
-        id,
-        runtimeId,
-        token: randomBytes(32).toString("base64url"),
-        pid: null,
-        port: null,
-        status: "starting",
-        summary,
-        launch: runnerLaunchFromRequest(request, environment, commandArgs, workspace.path),
-        updatedAt: now,
-      })
-      : this.#createInProcess(summary, request, workspace.path, environment, commandArgs);
-    this.#live.set(id, session);
+    this.#records.set(id, summary);
     if (hookToken) this.#hookTokens.set(id, hookToken);
+    this.#queuePersist(summary, rebound ? "rebound" : "created");
+    let session: NativeAwareSession;
+    try {
+      session = this.#useRunners
+        ? await this.#startRunner({
+          version: 1,
+          id,
+          runtimeId,
+          token: randomBytes(32).toString("base64url"),
+          pid: null,
+          port: null,
+          status: "starting",
+          summary,
+          launch: runnerLaunchFromRequest(request, environment, commandArgs, workspace.path),
+          updatedAt: now,
+        })
+        : this.#createInProcess(summary, request, workspace.path, environment, commandArgs);
+    } catch (error) {
+      this.#markRunnerUnavailable(summary);
+      throw error;
+    }
+    this.#live.set(id, session);
     this.#records.set(id, session.summary());
-    this.#queuePersist(session.summary(), rebound ? "rebound" : "created");
     this.#emit(session.summary());
     if (!this.#useRunners && session instanceof ManagedSession) this.#scheduleSnapshot(session, true);
     if (!nativeHint && adapter && !ephemeral) {
@@ -354,16 +364,30 @@ export class SessionManager {
     child.unref();
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
-      await delay(75);
-      const current = await this.#runnerStore.get(manifest.id);
-      if (!current || current.status !== "running" || !current.port) continue;
-      try {
-        return await RunnerSession.connect(current, this.#runnerCallbacks());
-      } catch {
-        // The runner may have written its port before Fastify was accepting connections.
+      const ready = await this.#runnerStore.get(manifest.id);
+      if (ready?.status === "running" && ready.port) {
+        try {
+          return await RunnerSession.connect(ready, this.#runnerCallbacks());
+        } catch {
+          // The runner may have written its port before Fastify was accepting connections.
+        }
+      } else if (ready && ready.status !== "starting") {
+        break;
       }
+      await delay(75);
     }
     throw new Error("Muxline runner did not become ready. Run `muxline agent` to inspect its host logs.");
+  }
+
+  async #waitForRunnerManifest(id: string, timeoutMilliseconds: number): Promise<RunnerManifest | null> {
+    const deadline = Date.now() + timeoutMilliseconds;
+    while (Date.now() < deadline) {
+      const current = await this.#runnerStore.get(id);
+      if (current?.status === "running" && current.port) return current;
+      if (current && current.status !== "starting") return current;
+      await delay(75);
+    }
+    return this.#runnerStore.get(id);
   }
 
   #runnerCallbacks() {
